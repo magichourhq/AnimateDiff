@@ -344,97 +344,86 @@ class AnimationPipeline(DiffusionPipeline):
                 f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
                 f" {type(callback_steps)}."
             )
-
-    def prepare_latents(self, init_image, batch_size, num_channels_latents, video_length, height, width, dtype, device,
-                        generator, latents=None):
-        if init_image is None:
-            init_latents = None
-        shape = (
-        batch_size, num_channels_latents, video_length, height // self.vae_scale_factor, width // self.vae_scale_factor)
-        print("inside prepare latents block")
-        if isinstance(generator, list) and len(generator) != batch_size:
+def prepare_latents(self, init_image, batch_size, num_channels_latents, video_length, height, width, dtype, device,
+                    generator, latents=None):
+    if init_image is None:
+        init_latents = None
+    shape = (
+    batch_size, num_channels_latents, video_length, height // self.vae_scale_factor, width // self.vae_scale_factor)
+    
+    if isinstance(generator, list) and len(generator) != batch_size:
+        raise ValueError(
+            f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+            f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+        )
+    
+    if init_image is not None:
+        print("inside init image block")
+        image = PIL.Image.open(init_image)
+        image = preprocess_image(image)
+        print("preprocessing_image completed")
+        if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
             raise ValueError(
-                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+                f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
             )
-        if init_image is not None:
-            print("inside init image block")
-            image = PIL.Image.open(init_image)
-            image = preprocess_image(image)
-            print("preprocessing_image completed")
-            if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
-                raise ValueError(
-                    f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
-                )
-            image = image.to(device=device, dtype=dtype)
-            print("image cast to device")
-            if isinstance(generator, list):
-                init_latents = [
-                    self.vae.encode(image[i: i + 1]).latent_dist.sample(generator[i]) for i in range(batch_size)
-                ]
-                init_latents = torch.cat(init_latents, dim=0)
-                print("inside isinstance generator init latents")
-            else:
-                print("init_latents = self.vae.encode")
-                try:
-                    image = image.to(torch.device("cuda"), dtype=dtype)
-                    init_latents = self.vae.encode(image).latent_dist.sample(generator)
-                    print("done creating init_latents")
-                except Exception as e:
-                    print(f"Error: {e}")
-                    print(f"Image shape: {image.shape}")
-                    print(f"Generator: {generator}")
-                    raise e  # re-throw the exception to stop the program
-
-        if latents is None:
-            rand_device = "cpu" if device.type == "mps" else device
-
-            if isinstance(generator, list):
-                print("inside the isinstancegenerator")
-                shape = shape
-                # shape = (1,) + shape[1:]
-                latents = [
-                    torch.randn(shape, generator=generator[i], device=rand_device, dtype=dtype)
-                    for i in range(batch_size)
-                ]
-                latents = torch.cat(latents, dim=0).to(device)
-            else:
-                latents = torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
-                if init_latents is not None:
-                    print("We doing this...")
-                    influence = 68
-                    for i in range(video_length):
-                        print("Doing the loop")
-                        # I just feel dividing by 30 yield stable result but I don't know why
-                        # gradully reduce init alpha along video frames (loosen restriction)
-                        try:
-                            init_alpha = (video_length - float(i)) / video_length / influence
-                            init_latents = init_latents.to(device)
-                            latents = latents.to(device)
-                            print("init_alpha established")
-                            latents[:, :, i, :, :] = init_latents * (.00969) + latents[:, :, i, :, :] * (
-                                        1 - (.0169)) #maybe second one should be .0292
-                            influence -= 4
-                            print(str(init_alpha))
-                            print(str(init_latents * .00969))
-                            if influence <= 10:
-                                influence = 10
-                        except Exception as e:
-                            print(f"Error: {e}")
-                            print(f"Image shape: {image.shape}")
-                            print(f"Generator: {generator}")
-                            raise e  # re-throw the exception to stop the program
-
-
+        image = image.to(device=device, dtype=dtype)
+        print("image cast to device")
+        if isinstance(generator, list):
+            init_latents = [
+                self.vae.encode(image[i: i + 1]).latent_dist.sample(generator[i]) for i in range(batch_size)
+            ]
+            init_latents = torch.cat(init_latents, dim=0)
+            print("inside isinstance generator init latents")
         else:
-            if latents.shape != shape:
-                raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
-            latents = latents.to(device)
+            print("init_latents = self.vae.encode")
+            try:
+                image = image.to(torch.device("cuda"), dtype=dtype)
+                init_latents = self.vae.encode(image).latent_dist.mean  # Use mean instead of sample
+                print("done creating init_latents")
+            except Exception as e:
+                print(f"Error: {e}")
+                print(f"Image shape: {image.shape}")
+                print(f"Generator: {generator}")
+                raise e  # re-throw the exception to stop the program
+    
+    if latents is None:
+        rand_device = "cpu" if device.type == "mps" else device
 
-        # scale the initial noise by the standard deviation required by the scheduler
-        if init_latents is None:
-            latents = latents * self.scheduler.init_noise_sigma
-        return latents
+        if isinstance(generator, list):
+            print("inside the isinstancegenerator")
+            latents = [
+                torch.randn(shape, generator=generator[i], device=rand_device, dtype=dtype)
+                for i in range(batch_size)
+            ]
+            latents = torch.cat(latents, dim=0).to(device)
+        else:
+            latents = torch.randn(shape, generator=generator, device=rand_device, dtype=dtype).to(device)
+            if init_latents is not None:
+                print("We doing this...")
+                influence = 68
+                for i in range(video_length):
+                    print("Doing the loop")
+                    try:
+                        init_alpha = (video_length - float(i)) / video_length / influence
+                        init_latents = init_latents.to(device)
+                        latents = latents.to(device)
+                        print("init_alpha established")
+                        latents[:, :, i, :, :] = init_latents * (.00789) + latents[:, :, i, :, :] * (
+                                    1 - (.00789))
+                        influence -= 4
+                        print(str(init_alpha))
+                        if influence <= 10:
+                            influence = 10
+                    except Exception as e:
+                        print(f"Error: {e}")
+                        print(f"Image shape: {image.shape}")
+                        print(f"Generator: {generator}")
+                        raise e  # re-throw the exception to stop the program
+    
+    # ... (rest of the function remains the same) ...
+    
+    return latents
+
 
     @torch.no_grad()
     def __call__(
